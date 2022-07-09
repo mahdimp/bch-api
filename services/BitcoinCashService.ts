@@ -16,19 +16,12 @@ export class BitcoinCashService {
     let RECV_ADDR = `${to}`;
     const SEND_ADDR = `${from}`;
     const balance = await this.getBalance(SEND_ADDR, false);
-    console.log(`balance: ${JSON.stringify(balance, null, 2)}`);
-    console.log(`Balance of sending address ${SEND_ADDR} is ${balance} BCH.`);
 
     if (balance <= 0.0) {
       throw "Balance of sending address is zero.";
     }
 
     if (RECV_ADDR === "") RECV_ADDR = SEND_ADDR;
-
-    const SEND_ADDR_LEGACY = bchjs.Address.toLegacyAddress(SEND_ADDR);
-    const RECV_ADDR_LEGACY = bchjs.Address.toLegacyAddress(RECV_ADDR);
-    console.log(`Sender Legacy Address: ${SEND_ADDR_LEGACY}`);
-    console.log(`Receiver Legacy Address: ${RECV_ADDR_LEGACY}`);
 
     const utxos = await bchjs.Electrumx.utxo(SEND_ADDR);
 
@@ -37,28 +30,19 @@ export class BitcoinCashService {
     const transactionBuilder = new bchjs.TransactionBuilder();
     let originalAmount = 0;
     let i = 0;
-    const remainder = 0;
 
-    // iterate over utxos and
     for (let utxo of utxos.utxos) {
       const vout = utxo.tx_pos;
       const txid = utxo.tx_hash;
       transactionBuilder.addInput(txid, vout);
-      console.log("utxo.value", utxo.value);
       originalAmount += utxo.value;
     }
 
-    // get fee
     const txFee = this.getTxFee(utxos.utxos.length, 1);
     const satoshisToSend = originalAmount - txFee;
-    console.log("utxos.utxos.length", utxos.utxos.length);
-    console.log("txFee", txFee);
-    console.log("txFee", satoshisToSend);
     transactionBuilder.addOutput(RECV_ADDR, satoshisToSend);
 
-    // sign utxo
     for (let utxoIndex in utxos.utxos) {
-      console.log("utxoIndex", utxoIndex);
       const utxo = utxos.utxos[utxoIndex];
       let wif = secret;
       let ecpair = bchjs.ECPair.fromWIF(wif);
@@ -75,7 +59,6 @@ export class BitcoinCashService {
 
     const tx = transactionBuilder.build();
     const hex = tx.toHex();
-    console.log("hex", hex);
     return hex;
   }
 
@@ -94,8 +77,6 @@ export class BitcoinCashService {
     const SEND_ADDR = `${from}`;
 
     const balance = await this.getBalance(SEND_ADDR, false);
-    console.log(`balance: ${JSON.stringify(balance, null, 2)}`);
-    console.log(`Balance of sending address ${SEND_ADDR} is ${balance} BCH.`);
 
     if (balance <= 0.0) {
       throw "Balance of sending address is zero.";
@@ -103,35 +84,29 @@ export class BitcoinCashService {
 
     if (RECV_ADDR === "") RECV_ADDR = SEND_ADDR;
 
-    const SEND_ADDR_LEGACY = bchjs.Address.toLegacyAddress(SEND_ADDR);
-    const RECV_ADDR_LEGACY = bchjs.Address.toLegacyAddress(RECV_ADDR);
-    console.log(`Sender Legacy Address: ${SEND_ADDR_LEGACY}`);
-    console.log(`Receiver Legacy Address: ${RECV_ADDR_LEGACY}`);
-
     const utxos = await bchjs.Electrumx.utxo(SEND_ADDR);
 
     if (utxos.utxos.length === 0) throw new Error("No UTXOs found.");
-
-    const utxo = await bchjs.Utxo.findBiggestUtxo(utxos.utxos);
-
-    const transactionBuilder = new bchjs.TransactionBuilder();
+    let originalAmount = 0;
 
     const satoshisToSend = bchjs.BitcoinCash.toSatoshi(amount);
-    const originalAmount = utxo.value;
-    const vout = utxo.tx_pos;
-    const txid = utxo.tx_hash;
+    const transactionBuilder = new bchjs.TransactionBuilder();
 
-    transactionBuilder.addInput(txid, vout);
+    let inputsCount = 0;
+    for (let utxo of utxos.utxos) {
+      const vout = utxo.tx_pos;
+      const txid = utxo.tx_hash;
+      transactionBuilder.addInput(txid, vout);
+      originalAmount += utxo.value;
+      inputsCount += 1;
+      const tempTxFee = this.getTxFee(inputsCount, 2);
+      if (originalAmount + tempTxFee > satoshisToSend) {
+        break;
+      }
+    }
 
-    const txFee = this.getTxFee();
-    console.log(`Transaction fee: ${txFee}`);
-
+    const txFee = this.getTxFee(inputsCount, 2);
     const remainder = originalAmount - satoshisToSend - txFee;
-
-    console.log("satoshisToSend", satoshisToSend);
-    console.log("originalAmount", originalAmount);
-    console.log("txFee", txFee);
-    console.log("remainder", remainder);
 
     if (remainder < 0) {
       throw new Error("Not enough BCH to complete transaction!");
@@ -140,22 +115,23 @@ export class BitcoinCashService {
     transactionBuilder.addOutput(RECV_ADDR, satoshisToSend);
     transactionBuilder.addOutput(SEND_ADDR, remainder);
 
-    let wif = secret;
-    let ecpair = bchjs.ECPair.fromWIF(wif);
-    const keyPair = ecpair;
-
-    let redeemScript;
-    transactionBuilder.sign(
-      0,
-      keyPair,
-      redeemScript,
-      transactionBuilder.hashTypes.SIGHASH_ALL,
-      originalAmount
-  );
+    for (let utxoIndex = 0; utxoIndex < inputsCount; utxoIndex++) {
+      const utxo = utxos.utxos[utxoIndex];
+      let wif = secret;
+      let ecpair = bchjs.ECPair.fromWIF(wif);
+      const keyPair = ecpair;
+      let redeemScript;
+      transactionBuilder.sign(
+        +utxoIndex,
+        keyPair,
+        redeemScript,
+        transactionBuilder.hashTypes.SIGHASH_ALL,
+        utxo.value
+      );
+    }
 
     const tx = transactionBuilder.build();
     const hex = tx.toHex();
-    console.log("hex", hex);
     return hex;
   }
 
@@ -188,13 +164,12 @@ export class BitcoinCashService {
     }
 
     const txidStr = await bchjs.RawTransactions.sendRawTransaction([hex]);
-    console.log(txidStr);
     return {
       result: txidStr[0],
     };
   }
 
-  async getBalance(addr: string, verbose:boolean) {
+  async getBalance(addr: string, verbose: boolean) {
     try {
       const result = await bchjs.Electrumx.balance(addr);
       const satBalance =
@@ -205,7 +180,6 @@ export class BitcoinCashService {
       return bchBalance;
     } catch (err) {
       console.error("Error in getBCHBalance: ", err);
-      console.log(`addr: ${addr}`);
       throw err;
     }
   }
@@ -215,7 +189,6 @@ export class BitcoinCashService {
       { P2PKH: inputsCount },
       { P2PKH: outputsCount }
     );
-    console.log(`Transaction byte count: ${byteCount}`);
     const satoshisPerByte = 1.2;
     return Math.floor(satoshisPerByte * byteCount);
   }
